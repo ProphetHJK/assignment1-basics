@@ -9,6 +9,7 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
+import regex as re
 
 def run_linear(
     d_in: int,
@@ -589,4 +590,89 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    vocab = {}
+    merges = []
+    # vocabulary 初始化
+    vocab_index = 0
+    for special_token in special_tokens:
+        vocab[vocab_index] = special_token.encode()
+        vocab_index = vocab_index + 1
+    for i in range(0,256):
+        vocab[vocab_index] = bytes([i])
+        vocab_index = vocab_index + 1
+    
+    with open(input_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    # 去掉特殊字符(拆分文章)
+    special_tokens_pattern = "|".join(map(re.escape, special_tokens))
+    parts = re.split(special_tokens_pattern, content)
+    # Pre-tokenization
+    pre_tokens = {}
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    for part in parts:
+        matches = re.finditer(PAT, part)
+        for val in matches:
+            pre_token = val.group().encode()
+            pre_tokens[pre_token] = pre_tokens.get(pre_token, 0) + 1
+    # Compute BPE merges
+    token_pairs = {}
+    # 1. 提取所有单字节的pair
+    for pre_token, count in pre_tokens.items():
+        for i in range(len(pre_token)-1):
+            token_pair = (pre_token[i].to_bytes(), pre_token[i+1].to_bytes())
+            token_pairs[token_pair] = token_pairs.get(token_pair, 0) + count
+
+    # 2. 根据已经有的pair更新计数
+    while True:
+        max_token_pair = tuple()
+        max_token_count = 0
+        for token_pair, count in token_pairs.items():
+            if count > max_token_count:
+                exsited = False
+                for merge_pair in merges:
+                    if merge_pair[0] + merge_pair[1] == token_pair[0] + token_pair[1]:
+                        exsited = True
+                        break
+                if exsited:
+                    continue
+                max_token_count = count
+                max_token_pair = token_pair
+        token_pairs[max_token_pair] = 0
+        vocab[vocab_index] = max_token_pair[0] + max_token_pair[1]
+        vocab_index = vocab_index + 1
+        merges.append(max_token_pair)
+
+        if vocab_index >= vocab_size:
+            break
+        for pre_token, count in pre_tokens.items():
+            pos = 0
+            while True:
+                max_token_bytes = max_token_pair[0] + max_token_pair[1]
+                pos = pre_token.find(max_token_bytes, pos)
+                if pos == -1:
+                    break
+                if pos >= 1:
+                    token_pair = (pre_token[pos - 1:pos], max_token_bytes)
+                    token_pairs[token_pair] = token_pairs.get(token_pair, 0) + count
+                if pos + len(max_token_bytes) < len(pre_token):
+                    token_pair = (max_token_bytes, pre_token[pos + len(max_token_bytes):pos + len(max_token_bytes)+1])
+                    token_pairs[token_pair] = token_pairs.get(token_pair, 0) + count
+
+                for merge_pair in merges:
+                    merge_pair_token = merge_pair[0] + merge_pair[1]
+                    if pos >= len(merge_pair_token):
+                        if pre_token[pos - len(merge_pair_token):pos] == merge_pair_token:
+                            token_pair = (merge_pair_token, max_token_bytes)
+                            token_pairs[token_pair] = token_pairs.get(token_pair, 0) + count
+                    if pos < len(pre_token) - len(merge_pair_token):
+                        if pre_token[pos + len(max_token_bytes):pos + len(max_token_bytes)+len(merge_pair_token)] == merge_pair_token:
+                            token_pair = (max_token_bytes, merge_pair_token)
+                            token_pairs[token_pair] = token_pairs.get(token_pair, 0) + count
+
+                pos = pos + len(max_token_bytes)
+
+    
+    print(vocab)
+    print(merges)
+
+    return (vocab, merges)
